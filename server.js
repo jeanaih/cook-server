@@ -178,7 +178,61 @@ app.get('/status', (req, res) => {
         status: 'online',
         database: db ? 'connected' : 'disconnected',
         userCount: Object.keys(users).length,
+        accountCount: Object.values(users).filter(u => u.type === 'account').length,
+        guestCount: Object.values(users).filter(u => u.type === 'guest').length,
         version: '1.0.1'
+    });
+});
+
+// ============ FIREBASE TEST ENDPOINT ============
+app.get('/test-firebase', async (req, res) => {
+    if (!db) {
+        return res.json({
+            status: 'error',
+            message: 'Firebase not initialized',
+            connected: false
+        });
+    }
+
+    try {
+        // Try to read from users collection
+        const snapshot = await db.collection('users').limit(1).get();
+        
+        res.json({
+            status: 'success',
+            message: 'Firebase connection working',
+            connected: true,
+            canRead: true,
+            userCount: snapshot.size
+        });
+    } catch (error) {
+        res.json({
+            status: 'error',
+            message: error.message,
+            connected: false,
+            errorCode: error.code,
+            errorDetails: error.details
+        });
+    }
+});
+
+// ============ DEBUG ENDPOINT - List all users ============
+app.get('/debug/users', (req, res) => {
+    const userList = Object.entries(users).map(([id, user]) => ({
+        id: id,
+        username: user.username || user.name,
+        type: user.type,
+        level: user.level,
+        xp: user.xp,
+        online: userToSocket[id] ? true : false
+    }));
+
+    res.json({
+        totalUsers: userList.length,
+        accounts: userList.filter(u => u.type === 'account').length,
+        guests: userList.filter(u => u.type === 'guest').length,
+        online: userList.filter(u => u.online).length,
+        users: userList
     });
 });
 
@@ -305,13 +359,27 @@ async function loadUsers() {
         try {
             console.log('🔄 Syncing users from Cloud Firestore...');
             const snapshot = await db.collection('users').get();
-            snapshot.forEach(doc => {
-                users[doc.id] = doc.data();
-            });
-            console.log(`🌐 Synced ${snapshot.size} users from Cloud Firestore.`);
+            
+            if (snapshot.empty) {
+                console.log('📭 No users found in Firestore (empty collection)');
+            } else {
+                snapshot.forEach(doc => {
+                    const userData = doc.data();
+                    users[doc.id] = userData;
+                    console.log(`✅ Loaded user: ${doc.id} (${userData.username || userData.name})`);
+                });
+                console.log(`🌐 Synced ${snapshot.size} users from Cloud Firestore.`);
+            }
         } catch (e) {
             console.error('❌ CRITICAL: Error syncing from Firestore:', e.message || e);
-            // Optionally, we could set db = null here if the error is non-transient
+            console.error('Full error:', e);
+            
+            // If authentication fails, disable Firebase
+            if (e.message && e.message.includes('UNAUTHENTICATED')) {
+                console.error('🔥 Firebase authentication failed - invalid or expired credentials');
+                console.error('Please check your serviceAccountKey.json file');
+                db = null; // Disable Firebase
+            }
         }
     } else {
         console.warn('⚠️ Firebase not connected. User registration and persistence will be disabled.');
@@ -408,6 +476,11 @@ async function loadUsers() {
     if (updated) {
         console.log(`✅ All user UIDs, Levels, and XP have been synced.`);
     }
+    
+    // Log final user count
+    const accountCount = Object.values(users).filter(u => u.type === 'account').length;
+    const guestCount = Object.values(users).filter(u => u.type === 'guest').length;
+    console.log(`👥 Total users loaded: ${accountCount} accounts, ${guestCount} guests`);
 }
 
 async function saveUserToCloud(userId, userData) {
@@ -1340,25 +1413,40 @@ io.on('connection', (socket) => {
 
         // Handle auto-login from localStorage
         if (autoLogin && userId) {
+            console.log(`🔐 Auto-login attempt for userId: ${userId}`);
             const user = users[userId];
             if (user && user.type === 'account') {
+                console.log(`✅ Auto-login successful for: ${userId}`);
                 finalizeAccountLogin(userId, user);
                 return;
+            } else {
+                console.log(`❌ Auto-login failed - user not found or not account type: ${userId}`);
+                // Send error to clear invalid localStorage
+                return socket.emit('loginError', { msg: 'Session expired. Please login again.', clearStorage: true });
             }
-            // If user not found for auto-login, fall through to password login
         }
 
-        const calculatedUserId = 'user_' + (username || '').toLowerCase();
+        // Regular login with username/password
+        if (!username || !password) {
+            return socket.emit('loginError', { msg: 'Username and password required!' });
+        }
+
+        const calculatedUserId = 'user_' + username.toLowerCase();
+        console.log(`🔐 Login attempt for username: ${username}, userId: ${calculatedUserId}`);
+        
         const user = users[calculatedUserId];
         if (!user || user.type !== 'account') {
+            console.log(`❌ User not found: ${calculatedUserId}`);
             return socket.emit('loginError', { msg: 'User not found!' });
         }
 
         try {
             const match = await bcrypt.compare(password, user.password);
             if (match) {
+                console.log(`✅ Password match for: ${calculatedUserId}`);
                 finalizeAccountLogin(calculatedUserId, user);
             } else {
+                console.log(`❌ Invalid password for: ${calculatedUserId}`);
                 socket.emit('loginError', { msg: 'Invalid password!' });
             }
         } catch (e) {
@@ -1371,8 +1459,11 @@ io.on('connection', (socket) => {
         let userId = data.userId;
         let name = data.name || 'Chef';
 
+        console.log(`🎭 Guest login attempt - userId: ${userId}, name: ${name}`);
+
         if (!userId || !userId.startsWith('guest_')) {
             userId = 'guest_' + Math.random().toString(36).substr(2, 9);
+            console.log(`🆕 Generated new guest ID: ${userId}`);
         }
         // Note: guests CAN have reconnect data (saved by userId = guest_xxx)
 
@@ -1391,6 +1482,7 @@ io.on('connection', (socket) => {
 
         // Guests are kept in memory but not saved to disk
         if (!users[userId]) {
+            console.log(`✨ Creating new guest user: ${userId}`);
             users[userId] = {
                 id: userId,
                 name: name,
@@ -1411,6 +1503,7 @@ io.on('connection', (socket) => {
                 }
             };
         } else {
+            console.log(`♻️ Reusing existing guest user: ${userId}`);
             users[userId].name = name;
         }
 
