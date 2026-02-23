@@ -5,7 +5,9 @@
 
 const https = require('https');
 
-const BACKEND_URL = 'https://cook-server-production.up.railway.app';
+// Update this to your actual Railway public URL
+// Check Railway dashboard for the public domain
+const BACKEND_URL = 'https://cook-server-production.up.railway.app'; // or your custom domain
 
 console.log('🔍 Testing Deployed Server...');
 console.log('📍 Backend URL:', BACKEND_URL);
