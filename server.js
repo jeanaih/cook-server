@@ -149,20 +149,38 @@ app.get('/api/leaderboard', async (req, res) => {
 let db = null;
 const FIREBASE_KEY_PATH = path.join(__dirname, 'serviceAccountKey.json');
 
-if (fs.existsSync(FIREBASE_KEY_PATH)) {
-    try {
+try {
+    if (fs.existsSync(FIREBASE_KEY_PATH)) {
         const serviceAccount = require(FIREBASE_KEY_PATH);
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
         db = admin.firestore();
-        console.log('🔥 Firebase Cloud Firestore Connected!');
-    } catch (e) {
-        console.error('❌ Firebase Init Error:', e.message || e);
+        console.log('🔥 Firebase Cloud Firestore Connected (via JSON)!');
+    } else if (process.env.FIREBASE_CONFIG) {
+        // Fallback for Railway/Cloud Run: Use ENV variable
+        const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+        db = admin.firestore();
+        console.log('🔥 Firebase Cloud Firestore Connected (via ENV)!');
+    } else {
+        console.warn('⚠️ No Firebase credentials found. Database will not be persistent.');
     }
-} else {
-    console.log('ℹ️ No serviceAccountKey.json found. User accounts will not be persistent.');
+} catch (e) {
+    console.error('❌ Firebase Init Error:', e.message || e);
 }
+
+// ============ SERVICE STATUS ============
+app.get('/status', (req, res) => {
+    res.json({
+        status: 'online',
+        database: db ? 'connected' : 'disconnected',
+        userCount: Object.keys(users).length,
+        version: '1.0.1'
+    });
+});
 
 // ============ ACHIEVEMENT SYSTEM ============
 function checkAchievements(user, player, room) {
